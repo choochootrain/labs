@@ -3,7 +3,7 @@ var container = document.querySelector(".container");
 var A = new AudioContext();
 var sample = document.querySelector("audio");
 const SAMPLE_MAX = 256.0;
-const FFT_SIZE = 64;
+const FFT_SIZE = 256;
 
 var source = A.createMediaElementSource(sample);
 
@@ -24,8 +24,16 @@ var widgets = [
     new SourceWidget(source),
     new AnalyserFrequencyWidget(analyser),
     new GainWidget(gain),
+    new AnalyserFrequencyWidget(analyserPost),
     new SpectrogramWidget(analyserPost)
 ];
+
+const COLORS = {
+    BG: '#555555',
+    WHITE: '#DDDDDD',
+    ACCENT1: '#00C3FF',
+    ACCENT2: '#FFFF1C'
+}
 
 //TODO fix prototype structure
 function Widget(name, width, height) {
@@ -49,7 +57,7 @@ function Widget(name, width, height) {
 }
 
 Widget.prototype.render = function() {
-    this.ctx.fillStyle = '#555555';
+    this.ctx.fillStyle = COLORS.BG;
     this.ctx.fillRect(0, 0, this.WIDTH, this.HEIGHT);
 };
 
@@ -61,23 +69,24 @@ function SourceWidget(source) {
 
     this.canvas.onclick = function() {
         !this.playing ? this.play() : this.pause();
-        this.playing = !this.playing;
     }.bind(this);
 };
 
 SourceWidget.prototype.play = function() {
     this.source.mediaElement.currentTime = 0;
     this.source.mediaElement.play();
+    this.playing = true;
 }
 
 SourceWidget.prototype.pause = function() {
     this.source.mediaElement.pause();
+    this.playing = false;
 }
 
 SourceWidget.prototype.render = function() {
     Widget.prototype.render.call(this);
 
-    this.ctx.fillStyle = "#FFFFFF";
+    this.ctx.fillStyle = COLORS.WHITE;
     if (!this.playing) {
         var h = this.HEIGHT / 3;
         var s = Math.sqrt(3) / 2 * h;
@@ -115,8 +124,8 @@ AnalyserFrequencyWidget.prototype.render = function() {
         var v = this.data[i] / SAMPLE_MAX;
 
         var gradient = this.ctx.createLinearGradient(0, 0, 0, this.HEIGHT);
-        gradient.addColorStop(0, '#00C3FF');
-        gradient.addColorStop(0.8, '#FFFF1C');
+        gradient.addColorStop(0.1, COLORS.ACCENT1);
+        gradient.addColorStop(0.9, COLORS.ACCENT2);
         this.ctx.fillStyle = gradient;
 
         var x = i * w;
@@ -213,47 +222,59 @@ var _interpolateHSL = function(color1, color2, factor) {
 };
 
 function SpectrogramWidget(analyser) {
-    Widget.call(this, "spectrogram", 1024, 256);
+    Widget.call(this, "spectrogram", 1024, 1024);
+
+    this.tempCanvas = document.createElement("canvas");
+    this.tempCanvas.width = this.WIDTH;
+    this.tempCanvas.height = this.HEIGHT;
+    this.tempCtx = this.tempCanvas.getContext("2d");
+    this.tempCtx.transform(1, 0, 0, -1, 0, this.HEIGHT);
 
     this.analyser = analyser;
     this.bufLen = analyser.frequencyBinCount;
 
-    this.retention = 256;
-    this.data = new Array(this.retention);
-    for (var i = 0; i < this.retention; i++) {
-        this.data[i] = new Uint8Array(this.bufLen);
-    }
+    this.data = new Uint8Array(this.bufLen);
+    this.first = true;
+    this.speed = 2;
 };
 
 SpectrogramWidget.prototype.render = function() {
-    Widget.prototype.render.call(this);
+    if (this.first) {
+        Widget.prototype.render.call(this);
+        this.first = false;
+    }
 
-    var data = this.data.shift();
-    this.analyser.getByteFrequencyData(data);
-    this.data.push(data);
+    this.analyser.getByteFrequencyData(this.data);
 
     var h = this.HEIGHT * 1.0 / this.bufLen;
-    var w = this.WIDTH * 1.0 / this.retention;
 
-    for (var x = 0; x < this.retention; x++) {
-        for (var y = 0; y < this.bufLen; y++) {
-            var v = this.data[x][y] / SAMPLE_MAX;
+    this.tempCtx.drawImage(this.canvas, 0, 0, this.WIDTH, this.HEIGHT);
 
-            var a = h2r('#00C3FF');
-            var b = h2r('#FFFF1C');
-            var c = _interpolateColor(a, b, v);
-            this.ctx.fillStyle = r2h(c);;
+    for (var i = 0; i < this.bufLen; i++) {
+        var v = this.data[i] / SAMPLE_MAX;
 
-            this.ctx.fillRect(x * w, y * h, w, h);
-        }
+        var a, b;
+            a = h2r(COLORS.BG);
+            b = h2r(COLORS.WHITE);
+
+        var c = _interpolateColor(a, b, v * 1.2);
+        this.ctx.fillStyle = r2h(c);
+
+        this.ctx.fillRect(this.WIDTH - this.speed, i * h, this.speed, h);
     }
+
+    this.ctx.save();
+    this.ctx.translate(-this.speed, 0);
+    this.ctx.drawImage(this.tempCanvas, 0, 0, this.WIDTH, this.HEIGHT, 0, 0, this.WIDTH, this.HEIGHT);
+    this.ctx.setTransform(1, 0, 0, -1, 0, this.HEIGHT);
 };
 
 function GainWidget(gain) {
-    Widget.call(this, "gain", 1024, 64);
+    Widget.call(this, "gain", 1024, 128);
 
     this.gain = gain;
-    this.pad = 10;
+    this.MAX_GAIN = 15;
+    this.pad = 13;
 
     this.adjusting = false;
 
@@ -265,14 +286,17 @@ function GainWidget(gain) {
         this.adjusting = false;
     }.bind(this);
 
+    this.canvas.onmouseleave = function() {
+        this.adjusting = false;
+    }.bind(this);
+
     this.canvas.onmousemove = function(evt) {
         if (!this.adjusting) return false;
 
         var dim = evt.target.getBoundingClientRect();
-        var x = evt.clientX - dim.left;
+        var relX = Math.min(this.WIDTH - 3 * this.pad, Math.max(3 * this.pad, evt.clientX - dim.left)) - 3 * this.pad;
 
-        var v = x / (this.WIDTH - 2 * this.pad);
-        this.gain.gain.value = Math.max(0, Math.min(1, v));
+        this.gain.gain.value = this.MAX_GAIN * relX / (this.WIDTH - 4 * this.pad);
     }.bind(this);
 };
 
@@ -280,16 +304,26 @@ GainWidget.prototype.render = function() {
     Widget.prototype.render.call(this);
 
     var gradient = this.ctx.createLinearGradient(0, 0, this.WIDTH, 0);
-    gradient.addColorStop(0, '#00C3FF');
-    gradient.addColorStop(0.8, '#FFFF1C');
-    this.ctx.fillStyle = gradient;
+    gradient.addColorStop(0.1, COLORS.ACCENT1);
+    gradient.addColorStop(0.9, COLORS.ACCENT2);
+    this.ctx.strokeStyle = gradient;
+    this.ctx.lineWidth = 2 * this.pad;
+    this.ctx.lineCap = 'round';
 
-    this.ctx.fillRect(2 * this.pad, this.HEIGHT / 2 - this.pad / 2, this.WIDTH - 4 * this.pad, this.pad);
-
-    var v = this.gain.gain.value * (this.WIDTH - 4 * this.pad);
     this.ctx.beginPath();
-    this.ctx.arc(v, this.HEIGHT / 2, 2 * this.pad, 0, 2 * Math.PI);
+    this.ctx.moveTo(4 * this.pad, this.HEIGHT / 2);
+    this.ctx.lineTo(this.WIDTH - 4 * this.pad, this.HEIGHT / 2);
+    this.ctx.stroke();
+
+    this.ctx.fillStyle = gradient;
+    this.ctx.strokeStyle = COLORS.BG;
+    this.ctx.lineWidth = 1;
+
+    var relX = this.gain.gain.value / this.MAX_GAIN * (this.WIDTH - 6 * this.pad);
+    this.ctx.beginPath();
+    this.ctx.arc(relX + 4 * this.pad, this.HEIGHT / 2, 2 * this.pad, 0, 2 * Math.PI);
     this.ctx.fill();
+    this.ctx.stroke();
 };
 
 function render() {
@@ -301,3 +335,5 @@ function render() {
 }
 
 render();
+
+widgets[0].play();
